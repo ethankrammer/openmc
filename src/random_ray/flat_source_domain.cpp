@@ -136,9 +136,14 @@ void FlatSourceDomain::update_neutron_source(double k_eff)
   const int t = 0;
   const int a = 0;
 
+  // Vector for gathering scatter source terms for Shannon entropy calculation
+  vector<float> p(n_source_regions_, 0.0f);
+  double scatter_rate_new = 0;
+
   // Add scattering source
 #pragma omp parallel for
   for (int sr = 0; sr < n_source_regions_; sr++) {
+    double volume = volume_[sr];
     int material = material_[sr];
 
     for (int e_out = 0; e_out < negroups_; e_out++) {
@@ -155,8 +160,34 @@ void FlatSourceDomain::update_neutron_source(double k_eff)
       }
 
       source_[sr * negroups_ + e_out] = scatter_source / sigma_t;
+
+      // Compute total scatter rate in FSR
+      scatter_source *= volume;
+
+      // Accumulate totals
+      scatter_rate_new += scatter_source;
+
+      p[sr] = scatter_source;
     }
   }
+
+  double H = 0.0;
+  // defining an inverse sum for better performance
+  double inverse_sum = 1 / scatter_rate_new;
+
+#pragma omp parallel for reduction(+ : H)
+  for (int sr = 0; sr < n_source_regions_; sr++) {
+    // Only if FSR has non-negative and non-zero scatter source
+    if (p[sr] > 0.0f) {
+      // Normalize to total weight of bank sites. p_i for better performance
+      float p_i = p[sr] * inverse_sum;
+      // Sum values to obtain Shannon entropy.
+      H -= p_i * std::log2(p_i);
+    }
+  }
+
+  // Adds entropy value to shared entropy vector in openmc namespace.
+  simulation::entropy.push_back(H);
 
   if (settings::run_mode == RunMode::EIGENVALUE) {
     // Add fission source if in eigenvalue mode
@@ -339,7 +370,7 @@ double FlatSourceDomain::compute_k_eff(double k_eff_old) const
   }
 
   // Adds entropy value to shared entropy vector in openmc namespace.
-  simulation::entropy.push_back(H);
+  // simulation::entropy.push_back(H);
 
   return k_eff_new;
 }
